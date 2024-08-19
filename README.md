@@ -2,6 +2,9 @@
 
 Keycloak Social Login extension for Discord.
 
+## New
+- Added support for Keycloak v25
+- Added support for mapping a user's guilds ID's into a `guild` user attribute
 
 ## Install
 
