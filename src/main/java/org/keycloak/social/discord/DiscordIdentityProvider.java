@@ -32,6 +32,8 @@ import org.keycloak.services.ErrorPageException;
 import org.keycloak.services.messages.Messages;
 
 import java.util.Set;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * @author <a href="mailto:wadahiro@gmail.com">Hiroyuki Wada</a>
@@ -67,14 +69,14 @@ public class DiscordIdentityProvider extends AbstractOAuth2IdentityProvider<Disc
 
     @Override
     protected BrokeredIdentityContext extractIdentityFromProfile(EventBuilder event, JsonNode profile) {
-        BrokeredIdentityContext user = new BrokeredIdentityContext(getJsonProperty(profile, "id"));
+        BrokeredIdentityContext user = new BrokeredIdentityContext(getJsonProperty(profile, "id"), getConfig());
 
-        user.setUsername(getJsonProperty(profile, "username") + "#" + getJsonProperty(profile, "discriminator"));
+        user.setUsername(getJsonProperty(profile, "username"));
         user.setEmail(getJsonProperty(profile, "email"));
-        user.setIdpConfig(getConfig());
         user.setIdp(this);
 
         AbstractJsonUserAttributeMapper.storeUserProfileForMapper(user, profile, getConfig().getAlias());
+
 
         return user;
     }
@@ -94,7 +96,48 @@ public class DiscordIdentityProvider extends AbstractOAuth2IdentityProvider<Disc
                 throw new ErrorPageException(session, Response.Status.FORBIDDEN, Messages.INVALID_REQUESTER);
             }
         }
-        return extractIdentityFromProfile(null, profile);
+        BrokeredIdentityContext user = extractIdentityFromProfile(null, profile);
+
+        // Get list of guild ID's from user, then add it to the `guilds` user attribute
+        JsonNode guildsArray = null;
+        try {
+            guildsArray = fetchWithRateLimit(GROUP_URL, accessToken);
+            List<String> guildIds = new ArrayList<>();
+            for (JsonNode guild : guildsArray) {
+                String guildId = getJsonProperty(guild, "id");
+                if (guildId != null) {
+                    guildIds.add(guildId);
+                } else {
+                    log.warn("Guild ID is missing in the guild response.");
+                }
+            }
+            user.setUserAttribute("guilds", guildIds);
+        } catch (Exception e) {
+            log.error("Error fetching guilds from Discord", e);
+        }
+        return user;
+    }
+
+    // Requests sometimes get ratelimited, added some logic to deal with ratelimiting for fetching guild ID's
+    private JsonNode fetchWithRateLimit(String url, String accessToken) throws Exception {
+        int retries = 3;
+        while (retries > 0) {
+            SimpleHttp.Response response = SimpleHttp.doGet(url, session).header("Authorization", "Bearer " + accessToken).asResponse();
+            if (response.getStatus() == 429) { 
+                String retryAfter = response.getFirstHeader("Retry-After");
+                if (retryAfter != null) {
+                    int retrySeconds = Integer.parseInt(retryAfter);
+                    log.warn("Rate limited. Retrying after " + retrySeconds + " seconds...");
+                    Thread.sleep(retrySeconds+1); 
+                    retries--;
+                } else {
+                    throw new IdentityBrokerException("Rate limit exceeded, but no Retry-After header found.");
+                }
+            } else {
+                return response.asJson(); 
+            }
+        }
+        throw new IdentityBrokerException("Exceeded maximum retries due to rate limiting.");
     }
 
     protected boolean isAllowedGuild(String accessToken) {
